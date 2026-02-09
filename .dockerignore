@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.env
+.DS_Store
+backend
+nginx
+scripts
+out
+build
+dist

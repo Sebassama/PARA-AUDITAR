@@ -1,0 +1,58 @@
+services:
+  # --- MÓDULO LÓGICO (Backend) ---
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cert_validator_backend
+    restart: always
+    env_file:
+      - .env.local
+      - ./backend/.env
+    environment:
+      - PORT=4000
+      - NODE_ENV=production
+      # (Las demás variables se cargan desde los archivos env_file)
+    networks:
+      - app-net
+    volumes:
+      - ./backend/uploads:/app/uploads # Persistencia temporal de uploads
+    # Extra host para resolver la IP si fuera necesario (opcional)
+    extra_hosts:
+      - "db-server:192.168.1.250"
+
+  # --- MÓDULO VISUAL (Frontend) ---
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cert_validator_frontend
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=/api
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    networks:
+      - app-net
+
+  # --- ESCUDO MAESTRO (Nginx) ---
+  nginx:
+    image: nginx:alpine
+    container_name: cert_validator_gatekeeper
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    # Red interna para Nginx <-> App
+    driver: bridge
