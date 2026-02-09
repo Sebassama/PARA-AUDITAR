@@ -31,7 +31,7 @@ COPY --from=builder /app/algorand-failover.mjs ./algorand-failover.mjs
 COPY --from=builder /app/db.mjs ./db.mjs
 COPY --from=builder /app/auth-routes.mjs ./auth-routes.mjs
 COPY --from=builder /app/microsoft-auth.mjs ./microsoft-auth.mjs
-
+COPY --from=builder /app/public-auth.mjs ./public-auth.mjs
 
 # Copiar otros archivos necesarios si los hay (helpers, etc)
 COPY --from=builder /app/algorand.mjs ./algorand.mjs 

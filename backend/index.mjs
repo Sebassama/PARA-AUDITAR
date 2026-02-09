@@ -6,7 +6,6 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken'; // PARA TOKENSWEB
 import authRoutes from './auth-routes.mjs'; //agregado oauth admin secre y grupos
-//import publicAuthRouter from './routes/public-auth.mjs'; //agregado oauth validaciones
 import fs from 'fs';
 import pool from './db.mjs';
 import algosdk from 'algosdk';
@@ -125,9 +124,11 @@ app.use(authRoutes);
 
 console.log('✅ Rutas de autenticación Microsoft OAuth configuradas para usuarios');
 
-// Rutas de autenticación Microsoft OAuth Validaciones
-//app.use('/api/auth', publicAuthRouter);
-//console.log('✅ Rutas de autenticación Microsoft OAuth configuradas para validaciones');
+// 🆕 Rutas de autenticación pública (solo email, sin wallet)
+import publicAuthRoutes from './public-auth.mjs';
+app.use('/api/auth/public', publicAuthRoutes);
+console.log('✅ Rutas de autenticación pública configuradas');
+
 
 // Middleware para extraer usuario autenticado (opcional para rutas protegidas)
 app.use((req, res, next) => {
