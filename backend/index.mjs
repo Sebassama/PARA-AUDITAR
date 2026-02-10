@@ -11,7 +11,6 @@ import pool from './db.mjs';
 import algosdk from 'algosdk';
 import { create as createIpfsClient } from 'ipfs-http-client';
 
-
 // Helper: crear cliente IPFS (AGREGAR SI NO EXISTE)
 function createClient(baseUrl) {
   const url = baseUrl.replace(/\/+$/, "") + "/api/v0";
@@ -45,7 +44,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-const IPFS_GATEWAY_URL = (process.env.IPFS_GATEWAY_URL || 'http://192.168.10.128:8080').replace(/\/+$/, '');
+const IPFS_GATEWAY_URL = (process.env.IPFS_GATEWAY_URL || 'http://192.168.1.45:8080').replace(/\/+$/, '');
 const INDEXER_URL = (process.env.INDEXER_URL || 'https://mainnet-idx.algonode.cloud').replace(/\/+$/, '');
 
 const toJSONSafe = (x) =>
@@ -440,15 +439,20 @@ app.delete('/api/eliminar-certificado/:id', async (req, res) => {
 
 // ---------- DB: roles ----------
 app.post('/api/guardar-rol', async (req, res) => {
-  const { wallet, role } = req.body;
+  const { wallet, role, email } = req.body;  // ✅ INCLUIR EMAIL
+  
+  console.log('[guardar-rol] 📝 Request recibido:', { wallet, role, email });
+  
   if (!wallet || !role) {
-    return res.status(400).json({ error: 'Faltan datos' });
+    console.error('[guardar-rol] ❌ Datos incompletos');
+    return res.status(400).json({ error: 'Faltan datos: wallet y role son obligatorios' });
   }
   
   // Validar email si se proporciona
   if (email) {
     const emailRegex = /^[a-zA-Z0-9._%+-]+@tesiscerttitlespo\.onmicrosoft\.com$/;
     if (!emailRegex.test(email)) {
+      console.error('[guardar-rol] ❌ Email inválido:', email);
       return res.status(400).json({ 
         error: 'Email debe ser del dominio @tesiscerttitlespo.onmicrosoft.com' 
       });
@@ -456,7 +460,9 @@ app.post('/api/guardar-rol', async (req, res) => {
   }
 
   try {
-    // Si hay email, insertarlo; si no, dejarlo NULL
+    console.log('[guardar-rol] 💾 Guardando en BD...');
+    
+    // ✅ QUERY CORRECTA con email
     await pool.query(
       `INSERT INTO wallet_roles (wallet, role, email) 
        VALUES ($1, $2, $3) 
@@ -466,25 +472,43 @@ app.post('/api/guardar-rol', async (req, res) => {
       [wallet, role, email || null]
     );
     
-    res.json({ message: 'Rol guardado correctamente' });
+    console.log('[guardar-rol] ✅ Rol guardado correctamente');
+    
+    res.json({ 
+      success: true,
+      message: 'Rol guardado correctamente' 
+    });
+    
   } catch (err) {
-    console.error('❌ Error al guardar rol:', err);
+    console.error('[guardar-rol] ❌ Error en BD:', err);
     
-    // Error de email duplicado
-    if (err.constraint === 'wallet_roles_email_unique') {
-      return res.status(409).json({ 
-        error: 'Este email ya está registrado con otra wallet' 
-      });
+    // Manejar errores específicos de PostgreSQL
+    if (err.code === '23505') {
+      // Unique violation
+      if (err.constraint === 'wallet_roles_email_unique') {
+        console.error('[guardar-rol] ❌ Email duplicado');
+        return res.status(409).json({ 
+          error: 'Este email ya está registrado con otra wallet' 
+        });
+      }
     }
     
-    // Error de dominio institucional
-    if (err.constraint === 'email_institutional_domain') {
-      return res.status(400).json({ 
-        error: 'Email debe ser del dominio @tesiscerttitlespo.onmicrosoft.com' 
-      });
+    if (err.code === '23514') {
+      // Check violation
+      if (err.constraint === 'email_institutional_domain') {
+        console.error('[guardar-rol] ❌ Email de dominio incorrecto');
+        return res.status(400).json({ 
+          error: 'Email debe ser del dominio @tesiscerttitlespo.onmicrosoft.com' 
+        });
+      }
     }
     
-    res.status(500).json({ error: 'Error al guardar el rol' });
+    // Error genérico
+    console.error('[guardar-rol] ❌ Error inesperado:', err.message);
+    res.status(500).json({ 
+      error: 'Error al guardar el rol',
+      details: err.message  // Solo en desarrollo
+    });
   }
 });
 
