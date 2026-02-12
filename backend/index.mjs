@@ -1889,6 +1889,648 @@ app.get('/api/ipfs/diagnose', async (req, res) => {
   res.json({ nodes: results });
 });
 
+// ============================================================================
+// SISTEMA DE AUDITORÍA CON CADENA HISTÓRICA INMUTABLE
+// Agregar al FINAL de backend/index.mjs (antes de app.listen)
+// ============================================================================
+//
+// Arquitectura:
+// - Wallet FROM: serverAcct (ALGOD_MNEMONIC en .env) - FIRMA
+// - Wallet TO: AUDIT_RECEIVER_WALLET (nueva en .env) - RECIBE
+// - IPFS: Cadena histórica (cada CID contiene TODO el histórico)
+// - Blockchain: NOTE con AUDIT|v1|<hash>|<cid>|<timestamp>|<admin_wallet>
+//
+// Ejemplo:
+// Lunes: Registro 2 usuarios → CID_1 (contiene 2 usuarios)
+// Martes: Registro 3 usuarios → CID_2 (contiene 5 usuarios: 2 del lunes + 3 nuevos)
+// Miércoles: Elimino 1 usuario → CID_3 (contiene 6 acciones: 5 anteriores + 1 eliminación)
+//
+// ============================================================================
+
+// Variable global para wallet receptora de auditoría
+const AUDIT_RECEIVER_WALLET = (process.env.AUDIT_RECEIVER_WALLET || '').trim();
+
+if (AUDIT_RECEIVER_WALLET && algosdk.isValidAddress(AUDIT_RECEIVER_WALLET)) {
+  console.log('[Audit-Init] ✅ Wallet receptora configurada:', AUDIT_RECEIVER_WALLET);
+} else {
+  console.warn('[Audit-Init] ⚠️  AUDIT_RECEIVER_WALLET no configurada en .env');
+}
+
+// ============================================================================
+// HELPER: Buscar última transacción de auditoría
+// ============================================================================
+
+async function getLastAuditTransaction() {
+  if (!AUDIT_RECEIVER_WALLET) {
+    console.log('[Audit] ⚠️  AUDIT_RECEIVER_WALLET no configurada');
+    return null;
+  }
+
+  try {
+    console.log('[Audit] 🔍 Buscando última auditoría en wallet:', AUDIT_RECEIVER_WALLET);
+
+    // Buscar transacciones a la wallet receptora (últimos 90 días)
+    const afterDate = new Date(Date.now() - 90 * 24 * 3600e3);
+    const afterIso = afterDate.toISOString();
+
+    console.log('[Audit] 📅 Buscando desde:', afterIso);
+
+    const resp = await indexerClient
+      .lookupAccountTransactions(AUDIT_RECEIVER_WALLET)
+      .txType('pay')
+      .afterTime(afterIso)
+      .limit(1000)  // Aumentar límite
+      .do();
+
+    console.log('[Audit] 📊 Total transacciones encontradas:', resp.transactions?.length || 0);
+
+    const txs = resp.transactions || [];
+    
+    if (txs.length === 0) {
+      console.log('[Audit] ℹ️  No hay transacciones en esta wallet');
+      return null;
+    }
+
+    // Ordenar por round DESCENDENTE (más reciente primero)
+    txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
+
+    console.log('[Audit] 🔍 Buscando NOTE con AUDIT|v1|...');
+
+    // Buscar la PRIMERA transacción con NOTE "AUDIT|v1|"
+    for (let i = 0; i < txs.length; i++) {
+      const tx = txs[i];
+      const noteB64 = tx.note;
+      
+      if (!noteB64) {
+        console.log(`[Audit]   [${i}] Round ${tx['confirmed-round']} - Sin NOTE`);
+        continue;
+      }
+
+      let noteUtf8;
+      try {
+        noteUtf8 = Buffer.from(noteB64, 'base64').toString('utf8');
+      } catch (err) {
+        console.log(`[Audit]   [${i}] Round ${tx['confirmed-round']} - Error decodificando NOTE`);
+        continue;
+      }
+
+      console.log(`[Audit]   [${i}] Round ${tx['confirmed-round']} - NOTE: ${noteUtf8.substring(0, 50)}...`);
+      
+      if (noteUtf8.startsWith('AUDIT|v1|')) {
+        // Parsear: AUDIT|v1|<hash>|<cid>|<timestamp>|<admin_wallet>
+        const parts = noteUtf8.split('|');
+        
+        if (parts.length < 4) {
+          console.log(`[Audit]   ⚠️  NOTE inválido (faltan partes):`, noteUtf8);
+          continue;
+        }
+
+        const cid = parts[3];
+        const hash = parts[2];
+        
+        console.log('\n[Audit] ✅ ¡Encontrada última auditoría!');
+        console.log('[Audit]   TxID:', tx.id);
+        console.log('[Audit]   Round:', tx['confirmed-round']);
+        console.log('[Audit]   CID:', cid);
+        console.log('[Audit]   Hash:', hash.substring(0, 16) + '...');
+        console.log('');
+        
+        return {
+          txId: tx.id,
+          round: tx['confirmed-round'],
+          hash: hash || null,
+          cid: cid || null,
+          timestamp: parts[4] ? parseInt(parts[4]) : null,
+          adminWallet: parts[5] || null,
+          noteUtf8: noteUtf8
+        };
+      }
+    }
+
+    console.log('[Audit] ℹ️  No se encontró ninguna transacción con AUDIT|v1|');
+    console.log('[Audit] 💡 Tip: Verifica que las transacciones tengan el NOTE correcto');
+    return null;
+
+  } catch (error) {
+    console.error('[Audit] ❌ Error buscando auditoría:', error.message);
+    console.error('[Audit] Stack:', error.stack);
+    return null;
+  }
+}
+
+// ============================================================================
+// HELPER: Descargar JSON de IPFS
+// ============================================================================
+
+async function downloadAuditJSON(cid) {
+  try {
+    const chunks = [];
+    for await (const chunk of ipfs.cat(cid)) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
+    return JSON.parse(buffer.toString('utf8'));
+  } catch (error) {
+    console.error('[Audit] Error descargando JSON:', error);
+    return null;
+  }
+}
+
+// ============================================================================
+// POST /api/audit/register-action
+// Registra una acción y construye cadena histórica
+// ============================================================================
+
+app.post('/api/audit/register-action', express.json(), async (req, res) => {
+  try {
+    console.log('\n════════════════════════════════════════════════');
+    console.log('🔐 AUDITORÍA: Registro de Acción');
+    console.log('════════════════════════════════════════════════\n');
+
+    // Validar configuración
+    if (!serverAcct) {
+      return res.status(501).json({ 
+        error: 'Auditoría deshabilitada: falta ALGOD_MNEMONIC' 
+      });
+    }
+
+    if (!AUDIT_RECEIVER_WALLET) {
+      return res.status(501).json({ 
+        error: 'Auditoría deshabilitada: falta AUDIT_RECEIVER_WALLET' 
+      });
+    }
+
+    const { 
+      action,         // 'register' | 'delete' | 'update'
+      adminEmail,
+      adminWallet,
+      targetWallet,
+      targetEmail,
+      targetRole
+    } = req.body;
+
+    if (!action || !adminEmail) {
+      return res.status(400).json({ error: 'Faltan campos requeridos' });
+    }
+
+    console.log('📋 Datos:');
+    console.log('  Action:', action);
+    console.log('  Admin:', adminEmail);
+    console.log('  Target:', targetWallet || 'N/A');
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 1: Buscar auditoría anterior
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n🔍 PASO 1: Buscar auditoría anterior');
+    const lastAudit = await getLastAuditTransaction();
+
+    let previousActions = [];
+    let previousCid = null;
+    let previousTxId = null;
+
+    if (lastAudit && lastAudit.cid) {
+      console.log('  ✅ Encontrada CID anterior:', lastAudit.cid);
+      
+      const previousJSON = await downloadAuditJSON(lastAudit.cid);
+      
+      if (previousJSON && previousJSON.actions) {
+        previousActions = previousJSON.actions;
+        previousCid = lastAudit.cid;
+        previousTxId = lastAudit.txId;
+        
+        console.log('  ✅ Acciones anteriores:', previousActions.length);
+      }
+    } else {
+      console.log('  ℹ️  Primera auditoría');
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 2: Crear nueva acción
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n📝 PASO 2: Crear nueva acción');
+
+    const newAction = {
+      action_type: action,
+      timestamp: new Date().toISOString(),
+      timestamp_unix: Date.now(),
+      admin: {
+        email: adminEmail,
+        wallet: adminWallet || null
+      },
+      target_user: {
+        wallet: targetWallet || null,
+        email: targetEmail || null,
+        role: targetRole || null
+      }
+    };
+
+    console.log('  ✅ Acción creada');
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 3: Construir JSON con TODA la cadena histórica
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n🔗 PASO 3: Construir cadena histórica');
+
+    const auditRecord = {
+      version: 'AUDIT-v1',
+      audit_type: 'user_management',
+      created_at: new Date().toISOString(),
+      
+      // TODA la cadena histórica: acciones anteriores + nueva
+      actions: [
+        ...previousActions,
+        newAction
+      ],
+      
+      // Referencias para verificación
+      previous_audit_cid: previousCid,
+      previous_tx_id: previousTxId,
+      
+      // Metadatos
+      total_actions: previousActions.length + 1,
+      chain_length: previousActions.length + 1
+    };
+
+    console.log('  ✅ Histórico completo:');
+    console.log('     Total acciones:', auditRecord.total_actions);
+    console.log('     CID anterior:', previousCid || 'null (primera)');
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 4: Subir a IPFS
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n📤 PASO 4: Subir a IPFS');
+
+    const jsonBuffer = Buffer.from(JSON.stringify(auditRecord, null, 2), 'utf8');
+    const added = await ipfs.add(jsonBuffer, { pin: true });
+    const newCid = added.cid.toString();
+
+    console.log('  ✅ CID:', newCid);
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 5: Calcular hash
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n🔐 PASO 5: Hash SHA-256');
+
+    const hash = crypto.createHash('sha256').update(jsonBuffer).digest('hex').toLowerCase();
+
+    console.log('  ✅ Hash:', hash.substring(0, 16) + '...');
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 6: Construir NOTE
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n📝 PASO 6: Construir NOTE');
+
+    const timestamp = Date.now();
+    const noteStr = `AUDIT|v1|${hash}|${newCid}|${timestamp}|${adminWallet || 'SYSTEM'}`;
+    const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
+
+    console.log('  NOTE:', noteStr.substring(0, 60) + '...');
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 7: Firmar transacción
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n✍️  PASO 7: Firmar transacción');
+    console.log('  FROM:', serverAcct.addr);
+    console.log('  TO:', AUDIT_RECEIVER_WALLET);
+
+    const sp = await buildSuggestedParamsFailover();
+
+    const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      from: serverAcct.addr,
+      to: AUDIT_RECEIVER_WALLET,
+      amount: 0,
+      note,
+      suggestedParams: sp,
+    });
+
+    const stxn = txn.signTxn(serverAcct.sk);
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 8: Enviar a blockchain
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n📤 PASO 8: Enviar a Algorand');
+
+    let txId;
+    try {
+      const result = await sendRawTransaction(stxn);
+      txId = result.txId;
+      console.log('  ✅ TxID:', txId);
+    } catch (e) {
+      const poolError = e?.response?.body?.message || e?.message || String(e);
+      console.error('  ❌ Rechazada:', poolError);
+      return res.status(400).json({
+        ok: false,
+        error: 'Transacción rechazada',
+        poolError,
+      });
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 9: Confirmar
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n⏳ PASO 9: Confirmar...');
+
+    const conf = await confirmRoundWithFallback({
+      txId,
+      waitSeconds: 20,
+    });
+
+    console.log('\n════════════════════════════════════════════════');
+    
+    if (conf.pending) {
+      console.log('⚠️  PENDIENTE');
+      console.log('════════════════════════════════════════════════\n');
+      
+      return res.status(202).json({
+        ok: true,
+        txId,
+        cid: newCid,
+        hash,
+        round: null,
+        pending: true,
+        total_actions: auditRecord.total_actions
+      });
+    }
+
+    console.log('✅ CONFIRMADA');
+    console.log('  Round:', conf.round);
+    console.log('  Confirmado por:', conf.confirmedBy);
+    console.log('  Total acciones en cadena:', auditRecord.total_actions);
+    console.log('════════════════════════════════════════════════\n');
+
+    return res.json({
+      ok: true,
+      txId,
+      cid: newCid,
+      hash,
+      round: conf.round,
+      confirmedBy: conf.confirmedBy,
+      total_actions: auditRecord.total_actions,
+      previous_cid: previousCid
+    });
+
+  } catch (error) {
+    console.error('\n❌ ERROR:', error);
+    console.log('════════════════════════════════════════════════\n');
+    
+    return res.status(500).json({ 
+      error: 'Error registrando auditoría',
+      detail: error?.message || String(error)
+    });
+  }
+});
+
+// ============================================================================
+// GET /api/audit/get-full-history
+// Obtiene el histórico COMPLETO desde el último CID
+// ============================================================================
+
+app.get('/api/audit/get-full-history', async (req, res) => {
+  try {
+    console.log('[Audit-History] 📚 Obteniendo histórico completo');
+
+    // Buscar última auditoría
+    const lastAudit = await getLastAuditTransaction();
+
+    if (!lastAudit || !lastAudit.cid) {
+      return res.json({
+        ok: true,
+        actions: [],
+        total: 0,
+        message: 'No hay auditorías registradas'
+      });
+    }
+
+    console.log('[Audit-History] ✅ Última auditoría encontrada');
+    console.log('[Audit-History]   CID:', lastAudit.cid);
+    console.log('[Audit-History]   TxID:', lastAudit.txId);
+
+    // Descargar JSON del último CID
+    const auditJSON = await downloadAuditJSON(lastAudit.cid);
+
+    if (!auditJSON || !auditJSON.actions) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No se pudo descargar el JSON de auditoría'
+      });
+    }
+
+    console.log('[Audit-History] ✅ Histórico descargado');
+    console.log('[Audit-History]   Total acciones:', auditJSON.actions.length);
+
+    return res.json({
+      ok: true,
+      actions: auditJSON.actions,
+      total: auditJSON.actions.length,
+      last_cid: lastAudit.cid,
+      last_tx_id: lastAudit.txId,
+      last_round: lastAudit.round,
+      chain_length: auditJSON.chain_length || auditJSON.actions.length
+    });
+
+  } catch (error) {
+    console.error('[Audit-History] ❌ Error:', error);
+    return res.status(500).json({ 
+      error: 'Error obteniendo histórico',
+      detail: error?.message || String(error)
+    });
+  }
+});
+
+// ============================================================================
+// GET /api/audit/verify-chain
+// Verifica la integridad de la cadena histórica
+// ============================================================================
+
+app.get('/api/audit/verify-chain', async (req, res) => {
+  try {
+    console.log('[Audit-Verify] 🔍 Verificando integridad de cadena');
+
+    const lastAudit = await getLastAuditTransaction();
+
+    if (!lastAudit || !lastAudit.cid) {
+      return res.json({
+        ok: true,
+        valid: true,
+        message: 'No hay cadena para verificar'
+      });
+    }
+
+    // Descargar JSON actual
+    const currentJSON = await downloadAuditJSON(lastAudit.cid);
+
+    if (!currentJSON) {
+      return res.status(404).json({
+        ok: false,
+        valid: false,
+        error: 'No se pudo descargar JSON actual'
+      });
+    }
+
+    // Verificar que tenga el formato correcto
+    if (!currentJSON.version || !currentJSON.actions || !Array.isArray(currentJSON.actions)) {
+      return res.json({
+        ok: false,
+        valid: false,
+        error: 'Formato de JSON inválido'
+      });
+    }
+
+    console.log('[Audit-Verify] ✅ JSON válido');
+    console.log('[Audit-Verify]   Versión:', currentJSON.version);
+    console.log('[Audit-Verify]   Total acciones:', currentJSON.actions.length);
+
+    // Si hay referencia a anterior, verificar que exista
+    if (currentJSON.previous_audit_cid) {
+      console.log('[Audit-Verify] 🔗 Verificando CID anterior:', currentJSON.previous_audit_cid);
+      
+      try {
+        const previousJSON = await downloadAuditJSON(currentJSON.previous_audit_cid);
+        
+        if (previousJSON) {
+          console.log('[Audit-Verify] ✅ CID anterior válido');
+        } else {
+          console.log('[Audit-Verify] ⚠️  CID anterior no accesible');
+        }
+      } catch (e) {
+        console.log('[Audit-Verify] ⚠️  Error accediendo CID anterior');
+      }
+    }
+
+    return res.json({
+      ok: true,
+      valid: true,
+      total_actions: currentJSON.actions.length,
+      has_previous: !!currentJSON.previous_audit_cid,
+      previous_cid: currentJSON.previous_audit_cid || null,
+      last_cid: lastAudit.cid,
+      last_tx_id: lastAudit.txId
+    });
+
+  } catch (error) {
+    console.error('[Audit-Verify] ❌ Error:', error);
+    return res.status(500).json({ 
+      error: 'Error verificando cadena',
+      detail: error?.message || String(error)
+    });
+  }
+});
+
+app.get('/api/audit/debug-transactions', async (req, res) => {
+  try {
+    if (!AUDIT_RECEIVER_WALLET) {
+      return res.json({ 
+        error: 'AUDIT_RECEIVER_WALLET no configurada' 
+      });
+    }
+
+    console.log('\n════════════════════════════════════════════════');
+    console.log('🔍 DEBUG: Analizando transacciones de auditoría');
+    console.log('════════════════════════════════════════════════\n');
+
+    const afterDate = new Date(Date.now() - 90 * 24 * 3600e3);
+    const afterIso = afterDate.toISOString();
+
+    console.log('Wallet receptora:', AUDIT_RECEIVER_WALLET);
+    console.log('Buscando desde:', afterIso);
+
+    const resp = await indexerClient
+      .lookupAccountTransactions(AUDIT_RECEIVER_WALLET)
+      .txType('pay')
+      .afterTime(afterIso)
+      .limit(1000)
+      .do();
+
+    const txs = resp.transactions || [];
+    
+    console.log('Total transacciones:', txs.length);
+
+    const analysis = {
+      wallet: AUDIT_RECEIVER_WALLET,
+      total_transactions: txs.length,
+      transactions: [],
+      audit_transactions: [],
+      other_transactions: []
+    };
+
+    // Ordenar por round
+    txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
+
+    for (const tx of txs) {
+      const txInfo = {
+        txId: tx.id,
+        round: tx['confirmed-round'],
+        from: tx.sender,
+        to: tx['payment-transaction']?.receiver,
+        amount: tx['payment-transaction']?.amount || 0,
+        hasNote: !!tx.note,
+        note: null,
+        noteRaw: tx.note || null
+      };
+
+      if (tx.note) {
+        try {
+          const noteUtf8 = Buffer.from(tx.note, 'base64').toString('utf8');
+          txInfo.note = noteUtf8;
+
+          if (noteUtf8.startsWith('AUDIT|v1|')) {
+            const parts = noteUtf8.split('|');
+            txInfo.parsed = {
+              version: parts[1],
+              hash: parts[2],
+              cid: parts[3],
+              timestamp: parts[4],
+              adminWallet: parts[5]
+            };
+            analysis.audit_transactions.push(txInfo);
+          } else {
+            analysis.other_transactions.push(txInfo);
+          }
+        } catch (err) {
+          txInfo.note = '[Error decodificando]';
+          analysis.other_transactions.push(txInfo);
+        }
+      } else {
+        analysis.other_transactions.push(txInfo);
+      }
+
+      analysis.transactions.push(txInfo);
+    }
+
+    console.log('\n📊 Resumen:');
+    console.log('  Total:', analysis.total_transactions);
+    console.log('  Con AUDIT|v1|:', analysis.audit_transactions.length);
+    console.log('  Otras:', analysis.other_transactions.length);
+
+    if (analysis.audit_transactions.length > 0) {
+      console.log('\n✅ Transacciones de auditoría encontradas:');
+      analysis.audit_transactions.forEach((tx, i) => {
+        console.log(`  [${i}] Round ${tx.round} - CID: ${tx.parsed?.cid}`);
+      });
+    }
+
+    console.log('\n════════════════════════════════════════════════\n');
+
+    return res.json(analysis);
+
+  } catch (error) {
+    console.error('Error en debug:', error);
+    return res.status(500).json({ 
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
 
 // ---------- start server ----------
 app.listen(PORT, () => {

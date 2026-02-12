@@ -12,7 +12,7 @@ import TitleForm from './TitleForm'
 import { LogOut, Wallet, Mail, CheckCircle2, AlertCircle, ShieldCheck } from 'lucide-react'
 
 const REQUIRED_ROLE = 'Secretaria'
-const ALLOWED_ROLES = ['Secretaria', 'Admin']
+const ALLOWED_ROLES = ['Secretaria']
 const peraWallet = new PeraWalletConnect()
 
 export default function SecretaryPage() {
@@ -246,7 +246,7 @@ export default function SecretaryPage() {
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>Rol no autorizado</AlertTitle>
               <AlertDescription>
-                Este módulo solo está disponible para los roles de <strong>Secretaria</strong> y <strong>Administrador</strong>.
+                Este módulo solo está disponible para los roles de <strong>Secretaria</strong>.
               </AlertDescription>
             </Alert>
 

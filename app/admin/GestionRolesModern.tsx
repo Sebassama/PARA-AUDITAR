@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { useMicrosoftAuth } from "@/hooks/useMicrosoftAuth";
+import { useAudit } from '@/hooks/useAudit';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -22,6 +23,7 @@ const ROLES = [
 
 export default function GestionRolesModern() {
   const { session } = useMicrosoftAuth();
+  const { registerAction } = useAudit();
   
   const [direccion, setDireccion] = useState("");
   const [email, setEmail] = useState("");
@@ -79,7 +81,6 @@ export default function GestionRolesModern() {
       return;
     }
 
-    // Validar formato de email institucional
     if (!email.endsWith('@tesiscerttitlespo.onmicrosoft.com')) {
       alert('⚠️ El email debe ser del dominio @tesiscerttitlespo.onmicrosoft.com');
       return;
@@ -88,6 +89,9 @@ export default function GestionRolesModern() {
     setLoading(true);
 
     try {
+      // ═══════════════════════════════════════════════════════════
+      // PASO 1: Guardar en base de datos
+      // ═══════════════════════════════════════════════════════════
       const response = await fetch('/api/guardar-rol', {
         method: 'POST',
         headers: {
@@ -105,11 +109,38 @@ export default function GestionRolesModern() {
         throw new Error(errorText || 'Error al guardar rol');
       }
 
+      // ═══════════════════════════════════════════════════════════
+      // PASO 2: Registrar en auditoría blockchain (NO BLOQUEANTE)
+      // ═══════════════════════════════════════════════════════════
+      try {
+        console.log('[Audit] 📝 Registrando acción en blockchain...');
+        
+        await registerAction({
+          action: 'register',
+          adminEmail: session?.email || 'SYSTEM',
+          adminWallet: session?.wallet || null,
+          targetWallet: direccion,
+          targetEmail: email,
+          targetRole: rol
+        });
+
+        console.log('[Audit] ✅ Auditoría registrada en blockchain');
+      } catch (auditError) {
+        // La auditoría falló, pero NO bloqueamos la operación
+        console.error('[Audit] ⚠️ Error en auditoría (no bloquea):', auditError);
+        // Opcional: mostrar warning al usuario
+        // toast.warning('Usuario guardado, pero la auditoría falló');
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // PASO 3: Actualizar UI
+      // ═══════════════════════════════════════════════════════════
       await obtenerRolesDesdeBD();
       setDireccion('');
       setEmail('');
       setRol('Secretaria');
       alert('✅ Rol asignado correctamente');
+
     } catch (err) {
       console.error('❌ Error:', err);
       alert('❌ No se pudo asignar el rol. Revisa la consola.');
@@ -124,14 +155,44 @@ export default function GestionRolesModern() {
     }
 
     try {
+      // Primero, obtener los datos del rol que vamos a eliminar (para auditoría)
+      const rolData = rolesGuardados[wallet];
+
+      // ═══════════════════════════════════════════════════════════
+      // PASO 1: Eliminar de base de datos
+      // ═══════════════════════════════════════════════════════════
       const res = await fetch(`/api/eliminar-rol/${wallet}`, {
         method: 'DELETE'
       });
       
       if (!res.ok) throw new Error('Error al eliminar rol');
-      
+
+      // ═══════════════════════════════════════════════════════════
+      // PASO 2: Registrar en auditoría blockchain (NO BLOQUEANTE)
+      // ═══════════════════════════════════════════════════════════
+      try {
+        console.log('[Audit] 🗑️  Registrando eliminación en blockchain...');
+        
+        await registerAction({
+          action: 'delete',
+          adminEmail: session?.email || 'SYSTEM',
+          adminWallet: session?.wallet || null,
+          targetWallet: wallet,
+          targetEmail: rolData?.email || null,
+          targetRole: rolData?.role || null
+        });
+
+        console.log('[Audit] ✅ Eliminación auditada en blockchain');
+      } catch (auditError) {
+        console.error('[Audit] ⚠️ Error en auditoría (no bloquea):', auditError);
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // PASO 3: Actualizar UI
+      // ═══════════════════════════════════════════════════════════
       await obtenerRolesDesdeBD();
       alert('✅ Rol eliminado correctamente');
+
     } catch (err) {
       console.error('❌ Error al eliminar rol:', err);
       alert('❌ Error al eliminar el rol');

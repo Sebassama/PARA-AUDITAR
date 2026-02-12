@@ -12,7 +12,7 @@ import CertificadoUpload from './CertificadoUpload'
 import { LogOut, Wallet, Mail, CheckCircle2, AlertCircle, ShieldCheck } from 'lucide-react'
 
 const REQUIRED_ROLES = ['Grupo-APS', 'Grupo-CS', 'Grupo-COMSOC', 'Grupo-Radio']
-const ALLOWED_ROLES = [...REQUIRED_ROLES, 'Admin']
+const ALLOWED_ROLES = [...REQUIRED_ROLES]
 const peraWallet = new PeraWalletConnect()
 
 export default function GroupsPage() {
@@ -115,7 +115,7 @@ export default function GroupsPage() {
               <AlertDescription>
                 Autentícate con tu email institucional de Microsoft.
                 <br /><br />
-                <strong>Roles permitidos:</strong> {REQUIRED_ROLES.join(', ')}, Admin
+                <strong>Roles permitidos:</strong> {REQUIRED_ROLES.join(', ')}.
               </AlertDescription>
             </Alert>
             <Alert>
@@ -246,7 +246,7 @@ export default function GroupsPage() {
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>Rol no autorizado</AlertTitle>
               <AlertDescription>
-                Este módulo solo está disponible para grupos académicos autorizados y administradores.
+                Este módulo solo está disponible para grupos académicos autorizados.
               </AlertDescription>
             </Alert>
 
@@ -275,7 +275,6 @@ export default function GroupsPage() {
                 {REQUIRED_ROLES.map(role => (
                   <li key={role}>• {role}</li>
                 ))}
-                <li>• Admin</li>
               </ul>
             </div>
 
