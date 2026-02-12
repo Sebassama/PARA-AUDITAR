@@ -1919,6 +1919,19 @@ if (AUDIT_RECEIVER_WALLET && algosdk.isValidAddress(AUDIT_RECEIVER_WALLET)) {
 // ============================================================================
 // HELPER: Buscar última transacción de auditoría
 // ============================================================================
+// ============================================================================
+// FIX: getLastAuditTransaction - Usar el MISMO indexer que ya funciona
+// ============================================================================
+// 
+// INSTRUCCIONES:
+// 1. Busca en backend/index.mjs la función `getLastAuditTransaction()`
+// 2. Reemplázala COMPLETA con este código
+// 3. Reinicia el backend
+//
+// CAMBIOS:
+// - Usa `indexerClient` que YA está definido en index.mjs (línea ~850)
+// - Mismo patron que usas para buscar PDFs (lookup-by-hash)
+// ============================================================================
 
 async function getLastAuditTransaction() {
   if (!AUDIT_RECEIVER_WALLET) {
@@ -1935,11 +1948,12 @@ async function getLastAuditTransaction() {
 
     console.log('[Audit] 📅 Buscando desde:', afterIso);
 
+    // ✅ USAR EL MISMO INDEXER QUE YA FUNCIONA PARA PDFs
     const resp = await indexerClient
       .lookupAccountTransactions(AUDIT_RECEIVER_WALLET)
       .txType('pay')
       .afterTime(afterIso)
-      .limit(1000)  // Aumentar límite
+      .limit(1000)
       .do();
 
     console.log('[Audit] 📊 Total transacciones encontradas:', resp.transactions?.length || 0);
@@ -1954,23 +1968,19 @@ async function getLastAuditTransaction() {
     // Ordenar por round DESCENDENTE (más reciente primero)
     txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
 
-    console.log('[Audit] 🔍 Buscando NOTE con AUDIT|v1|...');
+    console.log('[Audit] 🔍 Analizando transacciones...');
 
     // Buscar la PRIMERA transacción con NOTE "AUDIT|v1|"
     for (let i = 0; i < txs.length; i++) {
       const tx = txs[i];
       const noteB64 = tx.note;
       
-      if (!noteB64) {
-        console.log(`[Audit]   [${i}] Round ${tx['confirmed-round']} - Sin NOTE`);
-        continue;
-      }
+      if (!noteB64) continue;
 
       let noteUtf8;
       try {
         noteUtf8 = Buffer.from(noteB64, 'base64').toString('utf8');
       } catch (err) {
-        console.log(`[Audit]   [${i}] Round ${tx['confirmed-round']} - Error decodificando NOTE`);
         continue;
       }
 
@@ -2008,7 +2018,6 @@ async function getLastAuditTransaction() {
     }
 
     console.log('[Audit] ℹ️  No se encontró ninguna transacción con AUDIT|v1|');
-    console.log('[Audit] 💡 Tip: Verifica que las transacciones tengan el NOTE correcto');
     return null;
 
   } catch (error) {
@@ -2017,6 +2026,7 @@ async function getLastAuditTransaction() {
     return null;
   }
 }
+
 
 // ============================================================================
 // HELPER: Descargar JSON de IPFS
@@ -2530,6 +2540,209 @@ app.get('/api/audit/debug-transactions', async (req, res) => {
     });
   }
 });
+
+
+// ============================================================================
+// ENDPOINT DE DIAGNÓSTICO DE AUDITORÍA
+// ============================================================================
+//
+// INSTRUCCIONES:
+// 1. Copia este código AL FINAL de backend/index.mjs (antes de app.listen)
+// 2. Reinicia el backend
+// 3. Visita: http://192.168.1.100:3001/api/audit/diagnose
+//
+// ============================================================================
+
+app.get('/api/audit/diagnose', async (req, res) => {
+  try {
+    console.log('\n════════════════════════════════════════════════');
+    console.log('🔍 DIAGNÓSTICO COMPLETO DE AUDITORÍA');
+    console.log('════════════════════════════════════════════════\n');
+
+    const report = {
+      timestamp: new Date().toISOString(),
+      config: {},
+      indexer: {},
+      transactions: [],
+      summary: {}
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 1. CONFIGURACIÓN
+    // ═══════════════════════════════════════════════════════════
+
+    report.config = {
+      audit_receiver_wallet: AUDIT_RECEIVER_WALLET || 'NO CONFIGURADA',
+      has_signer: !!serverAcct,
+      signer_wallet: serverAcct?.addr || 'NO CONFIGURADA',
+      indexer_url: INDEXER_URL
+    };
+
+    console.log('📋 Configuración:');
+    console.log('  Wallet Receptora:', report.config.audit_receiver_wallet);
+    console.log('  Wallet Firmante:', report.config.signer_wallet);
+    console.log('  Indexer URL:', report.config.indexer_url);
+
+    if (!AUDIT_RECEIVER_WALLET) {
+      report.summary.error = 'AUDIT_RECEIVER_WALLET no configurada';
+      return res.json(report);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 2. PROBAR INDEXER
+    // ═══════════════════════════════════════════════════════════
+
+    console.log('\n🔌 Probando conexión con Indexer...');
+
+    try {
+      const health = await indexerClient.makeHealthCheck().do();
+      report.indexer.status = 'OK';
+      report.indexer.health = health;
+      console.log('  ✅ Indexer respondió correctamente');
+    } catch (error) {
+      report.indexer.status = 'ERROR';
+      report.indexer.error = error.message;
+      console.error('  ❌ Indexer falló:', error.message);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 3. BUSCAR TRANSACCIONES
+    // ═══════════════════════════════════════════════════════════
+
+    console.log('\n🔍 Buscando transacciones...');
+
+    const afterDate = new Date(Date.now() - 90 * 24 * 3600e3);
+    const afterIso = afterDate.toISOString();
+
+    console.log('  Wallet:', AUDIT_RECEIVER_WALLET);
+    console.log('  Desde:', afterIso);
+
+    const resp = await indexerClient
+      .lookupAccountTransactions(AUDIT_RECEIVER_WALLET)
+      .txType('pay')
+      .afterTime(afterIso)
+      .limit(1000)
+      .do();
+
+    const txs = resp.transactions || [];
+    console.log('  Total encontradas:', txs.length);
+
+    // ═══════════════════════════════════════════════════════════
+    // 4. ANALIZAR CADA TRANSACCIÓN
+    // ═══════════════════════════════════════════════════════════
+
+    console.log('\n📊 Analizando transacciones...\n');
+
+    let auditCount = 0;
+    let otherCount = 0;
+
+    for (let i = 0; i < txs.length; i++) {
+      const tx = txs[i];
+      const txInfo = {
+        index: i,
+        txId: tx.id,
+        round: tx['confirmed-round'],
+        from: tx.sender,
+        to: tx['payment-transaction']?.receiver,
+        amount: tx['payment-transaction']?.amount || 0,
+        hasNote: !!tx.note,
+        noteRaw: tx.note || null,
+        noteUtf8: null,
+        isAudit: false,
+        parsed: null
+      };
+
+      if (tx.note) {
+        try {
+          const noteUtf8 = Buffer.from(tx.note, 'base64').toString('utf8');
+          txInfo.noteUtf8 = noteUtf8;
+
+          console.log(`[${i}] Round ${tx['confirmed-round']}`);
+          console.log(`    NOTE: ${noteUtf8.substring(0, 60)}...`);
+
+          if (noteUtf8.startsWith('AUDIT|v1|')) {
+            const parts = noteUtf8.split('|');
+            txInfo.isAudit = true;
+            txInfo.parsed = {
+              version: parts[1],
+              hash: parts[2],
+              cid: parts[3],
+              timestamp: parts[4],
+              adminWallet: parts[5]
+            };
+            auditCount++;
+            console.log(`    ✅ ES AUDITORÍA - CID: ${parts[3]}`);
+          } else {
+            otherCount++;
+            console.log(`    ℹ️  Otra transacción`);
+          }
+        } catch (err) {
+          txInfo.noteUtf8 = '[Error decodificando]';
+          otherCount++;
+          console.log(`[${i}] ⚠️  Error decodificando NOTE`);
+        }
+      } else {
+        otherCount++;
+        console.log(`[${i}] Round ${tx['confirmed-round']} - Sin NOTE`);
+      }
+
+      report.transactions.push(txInfo);
+      console.log(''); // Línea en blanco
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 5. RESUMEN
+    // ═══════════════════════════════════════════════════════════
+
+    report.summary = {
+      total_transactions: txs.length,
+      audit_transactions: auditCount,
+      other_transactions: otherCount,
+      has_audits: auditCount > 0
+    };
+
+    console.log('\n════════════════════════════════════════════════');
+    console.log('📈 RESUMEN');
+    console.log('════════════════════════════════════════════════');
+    console.log('  Total transacciones:', report.summary.total_transactions);
+    console.log('  Con AUDIT|v1|:', report.summary.audit_transactions);
+    console.log('  Otras:', report.summary.other_transactions);
+    console.log('════════════════════════════════════════════════\n');
+
+    // ═══════════════════════════════════════════════════════════
+    // 6. DIAGNÓSTICO
+    // ═══════════════════════════════════════════════════════════
+
+    if (auditCount === 0) {
+      console.log('⚠️  DIAGNÓSTICO: No hay transacciones de auditoría');
+      console.log('');
+      console.log('Posibles causas:');
+      console.log('1. Las transacciones aún no se han confirmado');
+      console.log('2. El NOTE no tiene el formato correcto');
+      console.log('3. Se están enviando a otra wallet');
+      console.log('');
+      console.log('Verifica:');
+      console.log('- AUDIT_RECEIVER_WALLET en .env');
+      console.log('- Logs del backend al registrar usuario');
+      console.log('- Explorer de Algorand');
+    } else {
+      console.log('✅ Sistema funcionando correctamente');
+      console.log(`   Se encontraron ${auditCount} auditorías`);
+    }
+
+    return res.json(report);
+
+  } catch (error) {
+    console.error('\n❌ ERROR EN DIAGNÓSTICO:', error);
+    console.log('════════════════════════════════════════════════\n');
+    
+    return res.status(500).json({ 
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
 
 
 // ---------- start server ----------
