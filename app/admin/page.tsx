@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { useMicrosoftAuth } from '@/hooks/useMicrosoftAuth'
 import GestionRolesModern from './GestionRolesModern'
 import HistorialCertificados from './HistorialCertificados'
+import AuditoriaPanel from './AuditoriaPanel'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 import { LogOut, Wallet, Mail, CheckCircle2, AlertCircle, ShieldCheck } from 'lucide-react'
@@ -142,7 +143,7 @@ export default function AdminPage() {
               Iniciar con Microsoft
             </Button>
           </CardFooter>
-          
+
           {error && (
             <CardContent>
               <Alert variant="destructive">
@@ -210,9 +211,9 @@ export default function AdminPage() {
               </Button>
             ) : (
               <>
-                <Button 
-                  onClick={handleVerifyWallet} 
-                  className="flex-1" 
+                <Button
+                  onClick={handleVerifyWallet}
+                  className="flex-1"
                   size="lg"
                   disabled={verifying || walletAddress !== expectedWallet}
                 >
@@ -253,7 +254,7 @@ export default function AdminPage() {
               No tienes los permisos necesarios para acceder a este panel
             </CardDescription>
           </CardHeader>
-          
+
           <CardContent className="space-y-4">
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -288,9 +289,9 @@ export default function AdminPage() {
           </CardContent>
 
           <CardFooter className="flex flex-col gap-2 pt-4">
-            <Button 
-              onClick={handleSignOut} 
-              variant="destructive" 
+            <Button
+              onClick={handleSignOut}
+              variant="destructive"
               className="w-full"
               size="lg"
             >
@@ -333,6 +334,7 @@ export default function AdminPage() {
           <TabsList className="mb-8">
             <TabsTrigger value="roles">Gestión de Usuarios</TabsTrigger>
             <TabsTrigger value="historial">Historial de Certificados</TabsTrigger>
+            <TabsTrigger value="auditoria">Auditoría Blockchain</TabsTrigger>
           </TabsList>
 
           <TabsContent value="roles">
@@ -341,6 +343,10 @@ export default function AdminPage() {
 
           <TabsContent value="historial">
             <HistorialCertificados />
+          </TabsContent>
+
+          <TabsContent value="auditoria">
+            <AuditoriaPanel />
           </TabsContent>
         </Tabs>
       </div>

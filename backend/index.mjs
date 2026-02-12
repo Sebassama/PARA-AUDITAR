@@ -26,6 +26,8 @@ import ipfs, {
 } from './indexing.mjs';
 
 import {
+  searchTransactions,
+  indexerClient,
   getStickyAlgodClient,
   lookupTransactionByID,
   indexerHealthCheck,
@@ -113,7 +115,6 @@ const IDX_AHEAD_HOURS = Math.max(0, Number(process.env.IDX_AHEAD_HOURS || '1'));
 // ---------- INDEXER client (SDK) ----------
 // const indexerClient = new algosdk.Indexer('', INDEXER_URL, '');
 // console.log('[INDEXER_URL]', INDEXER_URL);
-
 // ---------- Middlewares ----------
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -1932,7 +1933,6 @@ if (AUDIT_RECEIVER_WALLET && algosdk.isValidAddress(AUDIT_RECEIVER_WALLET)) {
 // - Usa `indexerClient` que YA está definido en index.mjs (línea ~850)
 // - Mismo patron que usas para buscar PDFs (lookup-by-hash)
 // ============================================================================
-
 async function getLastAuditTransaction() {
   if (!AUDIT_RECEIVER_WALLET) {
     console.log('[Audit] ⚠️  AUDIT_RECEIVER_WALLET no configurada');
@@ -1942,13 +1942,10 @@ async function getLastAuditTransaction() {
   try {
     console.log('[Audit] 🔍 Buscando última auditoría en wallet:', AUDIT_RECEIVER_WALLET);
 
-    // Buscar transacciones a la wallet receptora (últimos 90 días)
     const afterDate = new Date(Date.now() - 90 * 24 * 3600e3);
     const afterIso = afterDate.toISOString();
 
-    console.log('[Audit] 📅 Buscando desde:', afterIso);
-
-    // ✅ USAR EL MISMO INDEXER QUE YA FUNCIONA PARA PDFs
+    // ✅ Usa directamente el indexer PÚBLICO (mainnet-idx.algonode.cloud)
     const resp = await indexerClient
       .lookupAccountTransactions(AUDIT_RECEIVER_WALLET)
       .txType('pay')
@@ -1959,60 +1956,44 @@ async function getLastAuditTransaction() {
     console.log('[Audit] 📊 Total transacciones encontradas:', resp.transactions?.length || 0);
 
     const txs = resp.transactions || [];
-    
     if (txs.length === 0) {
       console.log('[Audit] ℹ️  No hay transacciones en esta wallet');
       return null;
     }
 
-    // Ordenar por round DESCENDENTE (más reciente primero)
+    // Más reciente primero
     txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
 
-    console.log('[Audit] 🔍 Analizando transacciones...');
-
-    // Buscar la PRIMERA transacción con NOTE "AUDIT|v1|"
     for (let i = 0; i < txs.length; i++) {
       const tx = txs[i];
       const noteB64 = tx.note;
-      
       if (!noteB64) continue;
 
       let noteUtf8;
       try {
         noteUtf8 = Buffer.from(noteB64, 'base64').toString('utf8');
-      } catch (err) {
-        continue;
-      }
+      } catch { continue; }
 
-      console.log(`[Audit]   [${i}] Round ${tx['confirmed-round']} - NOTE: ${noteUtf8.substring(0, 50)}...`);
-      
       if (noteUtf8.startsWith('AUDIT|v1|')) {
-        // Parsear: AUDIT|v1|<hash>|<cid>|<timestamp>|<admin_wallet>
         const parts = noteUtf8.split('|');
-        
-        if (parts.length < 4) {
-          console.log(`[Audit]   ⚠️  NOTE inválido (faltan partes):`, noteUtf8);
-          continue;
-        }
+        if (parts.length < 4) continue;
 
-        const cid = parts[3];
         const hash = parts[2];
-        
-        console.log('\n[Audit] ✅ ¡Encontrada última auditoría!');
+        const cid  = parts[3];
+
+        console.log('[Audit] ✅ Encontrada última auditoría!');
         console.log('[Audit]   TxID:', tx.id);
         console.log('[Audit]   Round:', tx['confirmed-round']);
         console.log('[Audit]   CID:', cid);
-        console.log('[Audit]   Hash:', hash.substring(0, 16) + '...');
-        console.log('');
-        
+
         return {
-          txId: tx.id,
-          round: tx['confirmed-round'],
-          hash: hash || null,
-          cid: cid || null,
-          timestamp: parts[4] ? parseInt(parts[4]) : null,
+          txId:        tx.id,
+          round:       tx['confirmed-round'],
+          hash:        hash || null,
+          cid:         cid  || null,
+          timestamp:   parts[4] ? parseInt(parts[4]) : null,
           adminWallet: parts[5] || null,
-          noteUtf8: noteUtf8
+          noteUtf8
         };
       }
     }
@@ -2026,22 +2007,27 @@ async function getLastAuditTransaction() {
     return null;
   }
 }
-
-
 // ============================================================================
 // HELPER: Descargar JSON de IPFS
 // ============================================================================
 
 async function downloadAuditJSON(cid) {
   try {
+    console.log(`[Audit] 📥 Descargando JSON desde IPFS: ${cid}`);
+    
     const chunks = [];
     for await (const chunk of ipfs.cat(cid)) {
       chunks.push(chunk);
     }
     const buffer = Buffer.concat(chunks);
-    return JSON.parse(buffer.toString('utf8'));
+    const json = JSON.parse(buffer.toString('utf8'));
+    
+    console.log(`[Audit] ✅ JSON descargado exitosamente`);
+    console.log(`[Audit]   Acciones en archivo: ${json.actions?.length || 0}`);
+    
+    return json;
   } catch (error) {
-    console.error('[Audit] Error descargando JSON:', error);
+    console.error('[Audit] ❌ Error descargando JSON de IPFS:', error.message);
     return null;
   }
 }
@@ -2092,28 +2078,45 @@ app.post('/api/audit/register-action', express.json(), async (req, res) => {
     // PASO 1: Buscar auditoría anterior
     // ════════════════════════════════════════════════════════════════════
 
-    console.log('\n🔍 PASO 1: Buscar auditoría anterior');
-    const lastAudit = await getLastAuditTransaction();
+    // ========================================================================
+// PASO 1: Buscar auditoría anterior
+// ========================================================================
 
-    let previousActions = [];
-    let previousCid = null;
-    let previousTxId = null;
+  console.log('\n🔍 PASO 1: Buscar auditoría anterior');
+  const lastAudit = await getLastAuditTransaction();
 
-    if (lastAudit && lastAudit.cid) {
-      console.log('  ✅ Encontrada CID anterior:', lastAudit.cid);
-      
-      const previousJSON = await downloadAuditJSON(lastAudit.cid);
-      
-      if (previousJSON && previousJSON.actions) {
-        previousActions = previousJSON.actions;
-        previousCid = lastAudit.cid;
-        previousTxId = lastAudit.txId;
-        
-        console.log('  ✅ Acciones anteriores:', previousActions.length);
-      }
+  let previousActions = [];
+  let previousCid = null;
+  let previousTxId = null;
+
+  if (lastAudit && lastAudit.cid) {
+    console.log('  ✅ Encontrada auditoría anterior');
+    console.log('     CID:', lastAudit.cid);
+    console.log('     TxID:', lastAudit.txId);
+    console.log('     Round:', lastAudit.round);
+  
+    // 🔥 CRÍTICO: Descargar JSON anterior
+    const previousJSON = await downloadAuditJSON(lastAudit.cid);
+  
+    if (previousJSON && previousJSON.actions) {
+      previousActions = previousJSON.actions;
+      previousCid = lastAudit.cid;
+      previousTxId = lastAudit.txId;
+    
+      console.log('  ✅ JSON anterior descargado correctamente');
+      console.log('     Acciones anteriores:', previousActions.length);
+      console.log('     📋 Historial recuperado:');
+      previousActions.forEach((act, idx) => {
+        console.log(`        [${idx + 1}] ${act.action_type} - ${new Date(act.timestamp).toLocaleString()}`);
+      });
     } else {
-      console.log('  ℹ️  Primera auditoría');
+      console.log('  ❌ ERROR: No se pudo descargar JSON del CID anterior');
+      console.log('     Esto causará que se pierda el historial');
+      console.log('     CID intentado:', lastAudit.cid);
     }
+  } else {
+    console.log('  ℹ️  Primera auditoría (sin historial previo)');
+  }
 
     // ════════════════════════════════════════════════════════════════════
     // PASO 2: Crear nueva acción
@@ -2138,35 +2141,48 @@ app.post('/api/audit/register-action', express.json(), async (req, res) => {
 
     console.log('  ✅ Acción creada');
 
-    // ════════════════════════════════════════════════════════════════════
-    // PASO 3: Construir JSON con TODA la cadena histórica
-    // ════════════════════════════════════════════════════════════════════
+
+    // ========================================================================
+    // PASO 3: 🔥 CONSTRUIR CADENA HISTÓRICA (ACUMULAR ACCIONES)
+    // ========================================================================
 
     console.log('\n🔗 PASO 3: Construir cadena histórica');
+
+    // 🔥 CRÍTICO: Juntar acciones anteriores + nueva acción
+    const allActions = [
+      ...previousActions,  // 🔥 Acciones anteriores
+      newAction            // 🔥 Acción nueva
+    ];
 
     const auditRecord = {
       version: 'AUDIT-v1',
       audit_type: 'user_management',
       created_at: new Date().toISOString(),
-      
-      // TODA la cadena histórica: acciones anteriores + nueva
-      actions: [
-        ...previousActions,
-        newAction
-      ],
-      
+  
+      // 🔥 TODA la cadena histórica
+      actions: allActions,
+  
       // Referencias para verificación
       previous_audit_cid: previousCid,
       previous_tx_id: previousTxId,
-      
+  
       // Metadatos
-      total_actions: previousActions.length + 1,
-      chain_length: previousActions.length + 1
+      total_actions: allActions.length,
+      chain_length: allActions.length
     };
 
-    console.log('  ✅ Histórico completo:');
+    console.log('  ✅ Histórico completo construido:');
     console.log('     Total acciones:', auditRecord.total_actions);
+    console.log('     Acciones previas:', previousActions.length);
+    console.log('     Acción nueva:', 1);
     console.log('     CID anterior:', previousCid || 'null (primera)');
+
+
+    // ════════════════════════════════════════════════════════════════════
+    // PASO 3: Construir JSON con TODA la cadena histórica
+    // ════════════════════════════════════════════════════════════════════
+
+    console.log('\n🔗 PASO 3: Construir cadena histórica');
 
     // ════════════════════════════════════════════════════════════════════
     // PASO 4: Subir a IPFS
