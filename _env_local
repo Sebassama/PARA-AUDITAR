@@ -1,0 +1,16 @@
+# Frontend Environment Variables - Next.js
+
+# IPFS Gateways (con failover en frontend)
+# Apuntan a los nodos de tu red privada (Subnet 101)
+#NEXT_PUBLIC_IPFS_GATEWAYS=http://192.168.101.194:8080,http://192.168.101.193:8080,http://192.168.101.192:8080
+NEXT_PUBLIC_IPFS_GATEWAYS=https://192.168.1.100
+
+# Backend APIs (con failover en frontend)
+# Apuntan a los puertos 4000 de tus nodos
+NEXT_PUBLIC_API_BACKENDS=http://192.168.1.45:4000,http://192.168.101.193:4000,http://192.168.101.192:4000
+
+# Explorador de Algorand
+NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://explorer.perawallet.app
+
+# API URL Base (Vacío para usar rutas relativas /api/...) 
+NEXT_PUBLIC_API_BASE=
