@@ -1,0 +1,109 @@
+#===============================================================================
+# 1. BASE DE DATOS POSTGRESQL (VLAN 10)
+#===============================================================================
+PGHOST=192.168.1.250
+PGUSER=postgres
+PGPASSWORD=admin_secure_pass
+PGDATABASE=certificados_db
+PGPORT=5432
+
+#===============================================================================
+# 2. SERVIDOR BACKEND
+#===============================================================================
+PORT=4000
+ADMIN_KEY=1234567
+# Wallet administrador del sistema
+ADMIN_WALLET=6JDXEDK3UM772R3T6LLHQBFHJV2N27G4HW2SBLSFD5HK52O22QQ5DHEJRE
+# Wallet gestion de usuarios
+AUDIT_RECEIVER_WALLET=2JV7BGUI5CS6N3I3KU2J25CMQAOZYVDMVOER3W5GZ7EG53IEE66YJVR26A
+#===============================================================================
+# 3. ALGORAND - NODOS ALGOD (VLAN 40)
+#===============================================================================
+# Formato: URL:TOKEN,URL:TOKEN,...
+ALGOD_NODES=http://192.168.1.10:4001:97f46b0c69d88e504bad1027cbcddcf2fb46a3cec228419935c7b56be0c743ac,http://192.168.1.20:4001:ab3aa3662181b7ac7c9dc5e819b95258c518b6c465a7b75d0e34234008b09416,http://192.168.40.30:4001:b1c1a9f724db8f3ccde4350d19bd48331aded1a311974b964a454472023bd290,http://192.168.40.40:4001:4b0dd96e34a4c3a5611ab9eb9f0ec602156b86820ed8fc76a46c13d98d93b0d8,http://192.168.40.50:4001:15a9fcc0a471a5e74baa8f927f74bcbbd2d55959684caa0bb1084f627008a0a3
+
+#===============================================================================
+# 4. ALGORAND - INDEXERS (VLAN 40)
+#===============================================================================
+# Apuntar al indexer privado
+INDEXER_URLS=https://mainnet-idx.algonode.cloud
+
+# Configuración de ventana temporal para búsquedas
+IDX_LOOKBACK_HOURS=2
+IDX_AHEAD_HOURS=2
+
+#===============================================================================
+# 5. IPFS - NODOS (VLAN 10)
+#===============================================================================
+# Endpoints del cluster IPFS (puerto 9095 = ipfs-cluster proxy)
+IPFS_ENDPOINTS=http://192.168.1.45:9095,http://192.168.10.12:9095,http://192.168.10.6:9095
+
+# API URL (usado por algunas funciones legacy)
+IPFS_API_URL=http://192.168.1.45:9095/api/v0
+
+# Gateway URL (usado por el backend para construir URLs públicas)
+IPFS_GATEWAY_URL=http://192.168.1.45:8080
+
+#===============================================================================
+# 6. IPFS - ÍNDICE Y IPNS
+#===============================================================================
+# Raíz del índice en MFS
+CERT_INDEX_MFS_ROOT=/cert-index
+CERT_INDEX_SHARDS=2
+
+# IPNS Key para publicación del índice
+CERT_INDEX_IPNS_KEY=algocert-index-key
+IPFS_INDEX_IPNS_KEY=k51qzi5uqu5dlx7crkccrqkt89opxc8irbbxoxg2hv1y695qxxtiwiaagfzhcc
+
+# Cache del root CID en memoria
+CERT_INDEX_CACHE_TTL_SEC=120
+
+#===============================================================================
+# 7. FRONTEND - NEXT.JS VARIABLES
+#===============================================================================
+# IPFS Gateways (con failover en frontend)
+NEXT_PUBLIC_IPFS_GATEWAYS=http://192.168.1.45:8080,http://192.168.10.12:8080,http://192.168.10.128:8080
+
+# Backend APIs (con failover en frontend)
+NEXT_PUBLIC_API_BACKENDS=http://192.168.1.45:4000,http://192.168.10.12:4000,http://192.168.10.128:4000
+
+# Explorador de Algorand
+NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://explorer.perawallet.app
+
+#===============================================================================
+# 8. ALGORAND - FIRMA
+#===============================================================================
+NOTE_PREFIX=ALGOCERT1
+ALGOD_MNEMONIC=wi...
+
+
+#===============================================================================
+# 9. OAUTH USUARIOS
+#===============================================================================
+
+FRONTEND_URL=https://192.168.1.100
+# Redirect URI para Microsoft (CON HTTPS)
+MICROSOFT_REDIRECT_URI=https://192.168.1.100/api/auth/microsoft/callback
+# Seguridad
+JWT_SECRET=77...
+SESSION_DURATION=3600
+
+# Microsoft OAuth
+MICROSOFT_TENANT_ID=e78...
+MICROSOFT_CLIENT_ID=16...
+MICROSOFT_CLIENT_SECRET=36...
+
+# Dominios
+INSTITUTIONAL_EMAIL_DOMAIN=@tesiscerttitlespo.onmicrosoft.com
+PUBLIC_EMAIL_DOMAINS=@outlook.com,@hotmail.com,@live.com
+
+#===============================================================================
+# 10. AUTENTICACIÓN PÚBLICA Oauth(VALIDACIÓN)
+#===============================================================================
+# Redirect URI para autenticación pública (solo email, sin wallet)
+PUBLIC_REDIRECT_URI=https://192.168.1.100/api/auth/public/callback
+
+# Duración de sesión pública (en segundos) - 10 minutos
+PUBLIC_SESSION_DURATION=600
+
+
